@@ -1,1 +1,169 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Max.K Poker</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        :root{--bg:#0d1b2a;--table:#1b263b;--green:#00a896;--gold:#ffd60a;--red:#e63946;--text:#e0e1dd;--card:#fff;--shadow:0 8px 32px rgba(0,0,0,.6)}
+        body{margin:0;background:linear-gradient(135deg,var(--bg),#16213e);color:var(--text);font-family:system-ui,sans-serif;min-height:100vh}
+        #game{max-width:800px;margin:auto;padding:10px;text-align:center}
+        h1{color:var(--gold);text-shadow:0 0 10px #ffd60a80;font-size:2em;margin:10px}
+        #table{background:radial-gradient(#2d5016,var(--table));border-radius:50%/20%;padding:40px;margin:20px auto;max-width:700px;box-shadow:var(--shadow);position:relative}
+        #pot{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#000c;padding:10px 20px;border-radius:30px;color:var(--gold);font-weight:bold;font-size:1.3em}
+        #community-cards{display:flex;justify-content:center;gap:12px;flex-wrap:wrap}
+        .card{width:60px;height:90px;background:var(--card);border-radius:8px;box-shadow:0 4px 15px #0006;display:flex;flex-direction:column;justify-content:center;align-items:center;font-weight:bold;position:relative;transition:.4s;animation:deal .8s forwards}
+        .card::before{content:attr(data-r);position:absolute;top:6px;left:8px;font-size:14px}
+        .card::after{content:attr(data-s);position:absolute;bottom:6px;right:8px;font-size:24px}
+        .card.hearts,.card.diamonds{color:var(--red)}
+        .card.back{background:linear-gradient(45deg,#415a77,#778da9)}
+        @keyframes deal{0%{transform:translateY(-300px) rotate(-180deg) scale(0);opacity:0}100%{transform:none;opacity:1}}
+        #your-cards h3{color:var(--green);margin:15px 0 10px}
+        #players{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:20px 0}
+        .player{background:#1b263bCC;padding:12px;border-radius:12px;box-shadow:var(--shadow);border:2px solid transparent;transition:.3s}
+        .player.active{border-color:var(--gold);transform:scale(1.05)}
+        .player.folded{opacity:.5;filter:grayscale(1)}
+        #actions{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin:20px}
+        button, #bet-amount{padding:12px 20px;border:none;border-radius:30px;font-size:16px;font-weight:bold;cursor:pointer;transition:.3s}
+        button:hover:not(:disabled){transform:translateY(-3px);box-shadow:0 8px 20px #0006}
+        #fold{background:var(--red)} #check{background:#4361ee} #bet{background:var(--green)}
+        button:disabled{opacity:.5;cursor:not-allowed}
+        #bet-amount{width:120px;text-align:center}
+        #chips, #status{font-size:1.2em;margin:15px;color:var(--gold);font-weight:bold}
+    </style>
+</head>
+<body>
+    <div id="game">
+        <h1>Max.K Poker</h1>
+        <div id="status">Подключение...</div>
+        <div id="table">
+            <div id="pot">Пот: 0</div>
+            <div id="community-cards"></div>
+        </div>
+        <div id="your-cards">
+            <h3>Ваши карты</h3>
+            <div id="hole"></div>
+        </div>
+        <div id="players"></div>
+        <div id="chips">Фишки: <span id="your-chips">1000</span> 🪙</div>
+        <div id="actions">
+            <button id="fold">Фолд</button>
+            <button id="check">Чек / Колл</button>
+            <input type="number" id="bet-amount" min="10" placeholder="Сумма">
+            <button id="bet">Бет / Рейз</button>
+        </div>
+    </div>
 
+    <script>
+        const socket = io('https://your-server-here.onrender.com'); // ← ЗАМЕНИ НА СВОЙ URL
+        const tg = window.Telegram.WebApp;
+        tg.ready(); tg.expand();
+
+        const userId = tg.initDataUnsafe.user?.id || 'guest' + Math.random();
+        const username = tg.initDataUnsafe.user?.first_name || 'Игрок';
+
+        let roomId = null, isOwner = false, pot = 0, yourChips = 1000;
+        const suits = { '♥':'hearts', '♦':'diamonds', '♣':'clubs', '♠':'spades' };
+
+        function joinRoom() {
+            const input = prompt('ID комнаты (пусто = новая):');
+            roomId = input?.trim() || null;
+            let chips = 1000;
+            if (!roomId) {
+                chips = parseInt(prompt('Сколько фишек каждому? (100–50000)', '1000') || '1000');
+                chips = Math.min(50000, Math.max(100, chips));
+            }
+            socket.emit('joinRoom', { roomId, userId, username, startingChips: chips });
+        }
+
+        socket.on('roomJoined', d => {
+            roomId = d.roomId; isOwner = d.owner === userId;
+            document.getElementById('status').textContent = `Комната ${roomId} • ${d.startingChips} фишек • ${d.players.length}/12`;
+            updatePlayers(d.players);
+        });
+
+        socket.on('gameStarted', d => {
+            document.getElementById('status').textContent = 'Игра началась!';
+            dealHole(d.hands[userId] || []);
+        });
+
+        socket.on('dealCommunity', cards => dealBoard(cards));
+
+        socket.on('turn', d => {
+            pot = d.pot;
+            document.getElementById('pot').textContent = `Пот: ${pot}`;
+            const myTurn = d.currentPlayer === userId;
+            document.getElementById('status').textContent = myTurn ? '🔥 Ваш ход!' : 'Ждём ход...';
+            toggleActions(myTurn);
+            updatePlayers(players);
+        });
+
+        socket.on('playerUpdate', d => {
+            players = d.players; pot = d.pot;
+            document.getElementById('pot').textContent = `Пот: ${pot}`;
+            updatePlayers(players);
+            const me = players.find(p => p.userId === userId);
+            if (me) document.getElementById('your-chips').textContent = me.chips.toLocaleString();
+        });
+
+        socket.on('winner', d => {
+            document.getElementById('status').innerHTML = `🏆 ${d.winner.username} выиграл ${pot} фишек!`;
+        });
+
+        function cardEl(c, delay = 0) {
+            const el = document.createElement('div');
+            el.className = `card ${suits[c.suit]} deal`;
+            el.style.animationDelay = delay + 's';
+            el.dataset.r = c.rank;
+            el.dataset.s = c.suit;
+            el.innerHTML = `<big>${c.suit}</big><div>${c.rank}</div>`;
+            return el;
+        }
+
+        function dealHole(cards) {
+            const hole = document.getElementById('hole');
+            hole.innerHTML = '';
+            cards.forEach((c, i) => hole.appendChild(cardEl(c, i*0.2)));
+        }
+
+        function dealBoard(cards) {
+            const board = document.getElementById('community-cards');
+            board.innerHTML = '';
+            cards.forEach((c, i) => board.appendChild(cardEl(c, i*0.15)));
+        }
+
+        function updatePlayers(list) {
+            players = list;
+            const div = document.getElementById('players');
+            div.innerHTML = '';
+            list.forEach(p => {
+                const el = document.createElement('div');
+                el.className = `player ${p.folded ? 'folded' : ''}`;
+                if (p.userId === userId || p.userId === players.find(x => x.userId === currentPlayer)?.userId) el.classList.add('active');
+                el.innerHTML = `<b>${p.username} ${p.userId === userId ? '(Вы)' : ''} ${isOwner && p.userId === userId ? '👑' : ''}</b>
+                                <div>${p.chips.toLocaleString()} 🪙</div>
+                                ${p.folded ? '<small style="color:var(--red)">Фолд</small>' : ''}`;
+                div.appendChild(el);
+            });
+        }
+
+        function toggleActions(on) {
+            ['fold','check','bet','bet-amount'].forEach(id => document.getElementById(id).disabled = !on);
+        }
+
+        document.getElementById('fold').onclick = () => socket.emit('action', {roomId, userId, action:'fold'});
+        document.getElementById('check').onclick = () => socket.emit('action', {roomId, userId, action:'check'});
+        document.getElementById('bet').onclick = () => {
+            const amt = +document.getElementById('bet-amount').value;
+            if (amt >= 10 && amt <= yourChips) {
+                socket.emit('action', {roomId, userId, action:'bet', amount: amt});
+                document.getElementById('bet-amount').value = '';
+            } else tg.showAlert('Неверная ставка');
+        };
+
+        joinRoom();
+    </script>
+</body>
+</html>
